@@ -1,0 +1,663 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Snowball Fight – Physics Math Practice</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React + ReactDOM + Babel (for in-browser JSX) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    code { background: #f8fafc; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body class="bg-slate-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useMemo, useRef, useState, useEffect } = React;
+
+    // === THEME (99math-inspired) ===
+    const THEME = {
+      gradient: "bg-gradient-to-r from-fuchsia-600 via-pink-500 to-rose-500",
+      dark: "#0f1226",
+      card: "bg-white rounded-2xl shadow",
+      btnPrimary: "rounded-xl px-4 py-2 text-white bg-indigo-600 hover:bg-indigo-500",
+      btnGhost: "rounded-xl px-4 py-2 border border-slate-300 hover:bg-slate-50",
+      chip: "text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700",
+    };
+
+    // === Utils ===
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const rad = (deg) => (deg * Math.PI) / 180;
+    const fmt = (n, d = 2) => (Number.isFinite(n) ? n.toFixed(d) : "-");
+
+    const WORLD_W = 120; // meters
+    const WORLD_H = 40;  // meters
+
+    function projectileAt(t, v0, thetaRad, g = 9.8, windAx = 0) {
+      const vx0 = v0 * Math.cos(thetaRad);
+      const vy0 = v0 * Math.sin(thetaRad);
+      const x = vx0 * t + 0.5 * windAx * t * t;
+      const y = vy0 * t - 0.5 * g * t * t;
+      return { x, y };
+    }
+    function timeOfFlightFlat(v0, thetaRad, g = 9.8) {
+      const vy0 = v0 * Math.sin(thetaRad);
+      return (2 * vy0) / g;
+    }
+    function rangeFlat(v0, thetaRad, g = 9.8, windAx = 0) {
+      const t = timeOfFlightFlat(v0, thetaRad, g);
+      return v0 * Math.cos(thetaRad) * t + 0.5 * windAx * t * t;
+    }
+    function speedForRangeFlat(range, thetaRad, g = 9.8) {
+      const s = Math.sin(2 * thetaRad);
+      if (Math.abs(s) < 1e-6) return NaN;
+      const v2 = (range * g) / s;
+      return v2 > 0 ? Math.sqrt(v2) : NaN;
+    }
+    function angleForRangeFlat(range, v0, g = 9.8) {
+      const val = (range * g) / (v0 * v0);
+      if (val < -1 || val > 1) return NaN;
+      return 0.5 * Math.asin(clamp(val, -1, 1));
+    }
+
+    function prng(seed) { let s = seed >>> 0; return () => ((s = (1664525 * s + 1013904223) >>> 0), s / 0xffffffff); }
+
+    function toCSV(rows) {
+      if (!rows.length) return "";
+      const headers = Object.keys(rows[0]);
+      const esc = (v) => { const s = String(v ?? ""); return s.includes(",") || s.includes("\\n") || s.includes('"') ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      return [headers.join(","), ...rows.map((r) => headers.map((h) => esc(r[h])).join(","))].join("\\n");
+    }
+
+    // Base64 JSON tokens (offline join flow)
+    const encodeToken = (obj) => btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+    const decodeToken = (str) => JSON.parse(decodeURIComponent(escape(atob(str))));
+
+    const COLORS = ["#2563eb","#16a34a","#9333ea","#ea580c","#0ea5e9","#f59e0b","#ef4444"];
+
+    function SnowballFightApp() {
+      // === Global state & views ===
+      const VIEWS = [{key:"lobby",label:"Lobby"},{key:"play",label:"Play"},{key:"results",label:"Results"}];
+      const [view, setView] = useState(VIEWS[0].key);
+
+      const MODES = [{key:"practice",label:"Practice"},{key:"oneVsFifteen",label:"1 vs 15"}];
+      const LESSONS = [
+        { key: "speed", label: "Solve Speed (v)" },
+        { key: "angle", label: "Solve Angle (θ)" },
+        { key: "range", label: "Solve Range (R)" },
+        { key: "time",  label: "Solve Time (t)"  },
+      ];
+
+      const [seed, setSeed] = useState(2025);
+      const [gravity, setGravity] = useState(9.8);
+      const [windAx, setWindAx] = useState(0);
+      const [mode, setMode] = useState("oneVsFifteen");
+      const [lesson, setLesson] = useState("speed");
+      const [solveBeforeThrow, setSolveBeforeThrow] = useState(true);
+      const [tolerancePct, setTolerancePct] = useState(5);
+
+      // Round controls
+      const [roundDuration, setRoundDuration] = useState(90);
+      const [timeLeft, setTimeLeft] = useState(90);
+      const [roundActive, setRoundActive] = useState(false);
+      const [roundOver, setRoundOver] = useState(false);
+      const [roundTitle, setRoundTitle] = useState("Round 1");
+
+      // Rosters
+      const [teamA, setTeamA] = useState(defaultRoster("A")); // shooters
+      const [teamB, setTeamB] = useState(defaultRoster("B")); // targets
+
+      // Place players when seed changes
+      useEffect(() => {
+        const r = prng(seed);
+        const place = (side, list) => list.map((p, i) => ({...p, id:\`\${side}\${(i+1).toString().padStart(2,"0")}\`, x: side==="A" ? 6 + r()*22 : WORLD_W - (6 + r()*22), y:0}));
+        setTeamA((prev) => place("A", prev));
+        setTeamB((prev) => place("B", prev));
+      }, [seed]);
+
+      // Lobby: join code
+      const [lobbyCode, setLobbyCode] = useState(() => Math.random().toString(36).slice(2,8).toUpperCase());
+      const [importJSON, setImportJSON] = useState("");
+
+      function addFromToken(token) {
+        try {
+          const data = decodeToken(token);
+          const {team,name,emoji,color} = data || {};
+          const newChar = { name: (name||"Student").slice(0,18), emoji: emoji || "❄️", color: color || COLORS[0] };
+          if (team === "A") {
+            if (teamA.length >= 15) return alert("Team A is full (15)");
+            setTeamA((t) => [...t, newChar]);
+          } else {
+            if (teamB.length >= 15) return alert("Team B is full (15)");
+            setTeamB((t) => [...t, newChar]);
+          }
+        } catch (e) { alert("Invalid Join Token"); }
+      }
+
+      function exportRoster() {
+        const payload = { seed, teamA: teamA.map(({name,emoji,color})=>({name,emoji,color})), teamB: teamB.map(({name,emoji,color})=>({name,emoji,color})) };
+        setImportJSON(JSON.stringify(payload,null,2));
+      }
+      function importRoster() {
+        try { const obj = JSON.parse(importJSON); if(obj.seed) setSeed(obj.seed); if(obj.teamA) setTeamA(obj.teamA.slice(0,15)); if(obj.teamB) setTeamB(obj.teamB.slice(0,15)); }
+        catch { alert("Invalid JSON"); }
+      }
+
+      // ===== Gameplay state =====
+      const [shooterIndex, setShooterIndex] = useState(0);
+      const shooter = teamA[shooterIndex] || teamA[0];
+      const [progressIdx, setProgressIdx] = useState(0); // which target in 1v15
+      const [streak, setStreak] = useState(0);
+      const [badges, setBadges] = useState([]);
+      const target = mode==="oneVsFifteen" ? teamB[progressIdx] || teamB[0] : teamB[0];
+
+      const [studentName, setStudentName] = useState("");
+      const [angleDeg, setAngleDeg] = useState(45);
+      const [speed, setSpeed] = useState(20);
+      const [rangeGoal, setRangeGoal] = useState(30);
+      const [timeGuess, setTimeGuess] = useState(3.0);
+      const [validationMsg, setValidationMsg] = useState("");
+
+      const dx = target && shooter ? (target.x - shooter.x) : 0;
+      const thetaR = rad(angleDeg);
+      const refRange = rangeFlat(speed, thetaR, gravity, windAx);
+      const refTime  = timeOfFlightFlat(speed, thetaR, gravity);
+      const refAngleFromR = angleForRangeFlat(rangeGoal, speed, gravity);
+      const refSpeedFromR = speedForRangeFlat(rangeGoal, thetaR, gravity);
+
+      // Sim
+      const canvasRef = React.useRef(null);
+      const [simPath, setSimPath] = useState([]);
+      const [hit, setHit] = useState(false);
+      const [confetti, setConfetti] = useState({show:false, label:""});
+
+      useEffect(() => {
+        const scale = 16, CANVAS_W = WORLD_W * scale, CANVAS_H = WORLD_H * scale;
+        const wx = (x) => x * scale, wy = (y) => CANVAS_H - y * scale;
+        const ctx = canvasRef.current?.getContext("2d"); if(!ctx) return;
+        ctx.clearRect(0,0,CANVAS_W,CANVAS_H);
+        ctx.fillStyle = "#0ea5e9"; ctx.fillRect(0,0,CANVAS_W,CANVAS_H); // sky
+        ctx.fillStyle = "#cde8c9"; ctx.fillRect(0, wy(0), CANVAS_W, wy(-WORLD_H));
+        ctx.strokeStyle = "#a0b7ff"; ctx.setLineDash([6,6]); ctx.beginPath(); ctx.moveTo(wx(WORLD_W/2), wy(0)); ctx.lineTo(wx(WORLD_W/2), wy(WORLD_H)); ctx.stroke(); ctx.setLineDash([]);
+
+        const drawPlayer = (p) => { if(!p) return; ctx.fillStyle = p.color || "#2563eb"; ctx.beginPath(); ctx.arc(wx(p.x), wy(p.y)-8, 12, 0, Math.PI*2); ctx.fill(); ctx.font = "12px system-ui"; ctx.fillStyle = "#0f172a"; ctx.textAlign = "center"; ctx.fillText(p.emoji||"❄️", wx(p.x), wy(p.y)-14); ctx.fillText((p.name||p.id||"").slice(0,10), wx(p.x), wy(p.y)+20); };
+        teamA.forEach(drawPlayer); teamB.forEach(drawPlayer);
+
+        if(target){ ctx.strokeStyle="#111827"; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(wx(target.x), wy(target.y)-8, 16, 0, Math.PI*2); ctx.stroke(); }
+
+        if(simPath.length){ ctx.strokeStyle = hit?"#16a34a":"#1f2937"; ctx.lineWidth=2; ctx.beginPath(); for(let i=0;i<simPath.length;i++){ const p=simPath[i]; const cx=wx(shooter.x+p.x); const cy=wy(shooter.y+p.y); if(i===0) ctx.moveTo(cx,cy); else ctx.lineTo(cx,cy);} ctx.stroke(); const last=simPath[simPath.length-1]; const lx=wx(shooter.x+last.x); const ly=wy(shooter.y+last.y); ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(lx,ly,6,0,Math.PI*2); ctx.fill(); ctx.strokeStyle="#94a3b8"; ctx.stroke(); }
+      }, [teamA, teamB, shooter, target, simPath, hit]);
+
+      function triggerConfetti(label){ setConfetti({show:true,label}); setTimeout(()=> setConfetti({show:false,label:""}), 1800); }
+
+      function awardBadges(ns){
+        const earned = new Set(badges);
+        let unlocked = null;
+        if(ns===3){ earned.add("Sharpshooter (3-hit streak)"); unlocked = "Sharpshooter"; }
+        if(ns===5){ earned.add("Blizzard Sniper (5-hit streak)"); unlocked = "Blizzard Sniper"; }
+        if(ns===10){ earned.add("Legend of the Snow (10-hit streak)"); unlocked = "Legend of the Snow"; }
+        setBadges(Array.from(earned));
+        if(unlocked) triggerConfetti(unlocked);
+      }
+
+      function startRound(){ setTimeLeft(roundDuration); setRoundActive(true); setRoundOver(false); setAttempts([]); setStreak(0); setProgressIdx(0); setBadges([]); setView('play'); }
+      function endRound(){ setRoundActive(false); setRoundOver(true); }
+
+      useEffect(()=>{ if(!roundActive) return; if(timeLeft<=0){ endRound(); return; } const id=setInterval(()=>setTimeLeft(t=>t-1),1000); return ()=>clearInterval(id); }, [roundActive,timeLeft]);
+
+      function simulateThrow(){
+        if(!shooter||!target) return;
+        if(!roundActive){ setValidationMsg("Start the round first."); return; }
+
+        // Solve-before-throw checks
+        if(solveBeforeThrow){
+          const tol = Math.max(0, tolerancePct)/100; // fraction
+          let ok = true, need="";
+          if(lesson==="speed"){
+            if(Number.isFinite(refSpeedFromR)){
+              const err = Math.abs(speed - refSpeedFromR)/refSpeedFromR;
+              ok = err <= tol; need = \`v ≈ \${refSpeedFromR.toFixed(2)} m/s\`;
+            } else { ok = false; need = "v from R,θ undefined (check inputs)"; }
+          } else if(lesson==="angle"){
+            if(Number.isFinite(refAngleFromR)){
+              const targetAngle = refAngleFromR*180/Math.PI;
+              const err = Math.abs(angleDeg - targetAngle)/Math.max(1e-6, Math.abs(targetAngle));
+              ok = err <= tol; need = \`θ ≈ \${targetAngle.toFixed(2)}°\`;
+            } else { ok = false; need = "θ from R,v undefined (check inputs)"; }
+          } else if(lesson==="range"){
+            const targetR = Math.abs(dx);
+            const err = Math.abs(rangeGoal - targetR)/Math.max(1e-6, targetR);
+            ok = err <= tol; need = \`R ≈ \${targetR.toFixed(2)} m\`;
+          } else if(lesson==="time"){
+            const targetT = refTime;
+            const err = Math.abs(timeGuess - targetT)/Math.max(1e-6, targetT);
+            ok = err <= tol; need = \`t ≈ \${targetT.toFixed(2)} s\`;
+          }
+          if(!ok){ setValidationMsg(\`Check your math first (±\${tolerancePct}%): \${need}\`); return; }
+        }
+        setValidationMsg("");
+
+        const dt = 0.02, targetR=1.2; let t=0; const path=[]; let localHit=false; while(t<10){ const p=projectileAt(t, speed, thetaR, gravity, windAx); path.push(p); if(p.y<0) break; const tx=target.x-shooter.x, ty=target.y-shooter.y; const d=Math.hypot(p.x-tx, p.y-ty); if(d<=targetR){ localHit=true; break;} t+=dt; }
+        setHit(localHit);
+        setSimPath(path);
+
+        logAttempt(localHit);
+        if(mode==="oneVsFifteen"){ if(localHit){ setProgressIdx(i=>Math.min(i+1, teamB.length-1)); setStreak(s=>{ const ns=s+1; awardBadges(ns); return ns; }); } else { setStreak(0); } }
+      }
+
+      const [attempts, setAttempts] = useState([]);
+      function logAttempt(localHit){ const rec = { ts:new Date().toISOString(), student: studentName||"(anon)", mode, lesson, shooter: shooter?.name, target: target?.name, g:gravity, ax:windAx, theta:angleDeg, v:speed, Rgoal:rangeGoal, tguess: timeGuess, dx:Number(fmt(dx)), hit:localHit?1:0, Rcalc:Number(fmt(refRange,3)), tcalc:Number(fmt(refTime,3)) }; setAttempts(a=>[rec,...a]); }
+      function exportCSV(){ const csv=toCSV(attempts); const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=\`snowball_attempts_\${Date.now()}.csv\`; a.click(); URL.revokeObjectURL(url); }
+
+      return (
+        <div className="min-h-screen w-full bg-slate-50">
+          <div className={\`\${THEME.gradient} text-white px-4 py-4 shadow\`}> 
+            <div className="max-w-7xl mx-auto flex items-center gap-3">
+              <div className="text-2xl font-black tracking-tight">Snowball Fight</div>
+              <span className={\`\${THEME.chip}\`}>Grade 10</span>
+              <span className={\`\${THEME.chip}\`}>Chromebook Ready</span>
+              <div className="ml-auto flex items-center gap-2">
+                {[{key:"lobby",label:"Lobby"},{key:"play",label:"Play"},{key:"results",label:"Results"}].map(v => (
+                  <button key={v.key} onClick={()=>setView(v.key)} className={\`rounded-xl px-3 py-1.5 \${view===v.key? 'bg-white/20' : 'bg-white/10'} hover:bg-white/25\`}>{v.label}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="max-w-7xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+            {view === 'lobby' && (
+              <div className="lg:col-span-12 grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className={\`\${THEME.card} p-4\`}>
+                  <div className="text-xl font-bold mb-2">Create Lobby</div>
+                  <div className="text-sm text-slate-600 mb-2">Show this on the projector. Students make avatars and send you a Join Token.</div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="text-4xl font-black tracking-widest tabular-nums">{lobbyCode}</div>
+                    <button className={THEME.btnGhost} onClick={()=>setLobbyCode(Math.random().toString(36).slice(2,8).toUpperCase())}>New Code</button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <label className="flex items-center justify-between gap-2">Seed
+                      <input type="number" className="border rounded px-2 py-1 w-28" value={seed} onChange={(e)=>setSeed(parseInt(e.target.value||0,10))} />
+                    </label>
+                    <label className="flex items-center justify-between gap-2">Mode
+                      <select className="border rounded px-2 py-1" value={mode} onChange={(e)=>setMode(e.target.value)}>
+                        {MODES.map(m=> <option key={m.key} value={m.key}>{m.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex items-center justify-between gap-2">Lesson
+                      <select className="border rounded px-2 py-1" value={lesson} onChange={(e)=>setLesson(e.target.value)}>
+                        {LESSONS.map(l=> <option key={l.key} value={l.key}>{l.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex items-center justify-between gap-2">g (m/s²)
+                      <input type="number" className="border rounded px-2 py-1 w-28" value={gravity} step={0.1} onChange={(e)=>setGravity(parseFloat(e.target.value||0))} />
+                    </label>
+                    <label className="flex items-center justify-between gap-2">aₓ wind (m/s²)
+                      <input type="number" className="border rounded px-2 py-1 w-28" value={windAx} step={0.1} onChange={(e)=>setWindAx(parseFloat(e.target.value||0))} />
+                    </label>
+                    <label className="flex items-center justify-between gap-2">Solve before throw
+                      <input type="checkbox" className="scale-125" checked={solveBeforeThrow} onChange={(e)=>setSolveBeforeThrow(e.target.checked)} />
+                    </label>
+                    <label className="flex items-center justify-between gap-2">Tolerance (%)
+                      <input type="number" className="border rounded px-2 py-1 w-20" value={tolerancePct} onChange={(e)=>setTolerancePct(parseFloat(e.target.value||0))} />
+                    </label>
+                  </div>
+                </div>
+
+                <div className={\`\${THEME.card} p-4\`}>
+                  <div className="text-xl font-bold mb-2">Add Players via Join Token</div>
+                  <div className="text-sm text-slate-600 mb-2">Students open the Student Join section, enter lobby code, make avatar, then click <b>Copy Join Token</b> and send it to you. Paste token here.</div>
+                  <textarea className="w-full h-28 border rounded p-2 text-xs font-mono mb-2" placeholder="Paste token here" id="joinToken"></textarea>
+                  <div className="flex items-center gap-2">
+                    <button className={THEME.btnPrimary} onClick={()=>{ const el=document.getElementById('joinToken'); const t=(el && el.value||'').trim(); if(t) addFromToken(t); }}>Add Player</button>
+                    <button className={THEME.btnGhost} onClick={()=>{ const el=document.getElementById('joinToken'); if(el) el.value=''; }}>Clear</button>
+                  </div>
+                </div>
+
+                <div className={\`\${THEME.card} p-4\`}>
+                  <div className="text-xl font-bold mb-2">Roster Import/Export</div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <button className={THEME.btnGhost} onClick={exportRoster}>Export JSON</button>
+                    <button className={THEME.btnGhost} onClick={importRoster}>Import JSON</button>
+                  </div>
+                  <textarea className="w-full h-36 border rounded p-2 text-xs font-mono" placeholder='{"seed":2025,"teamA":[{"name":"Alicia","emoji":"❄️","color":"#2563eb"}],"teamB":[]}' value={importJSON} onChange={(e)=>setImportJSON(e.target.value)} />
+                </div>
+
+                <div className={\`\${THEME.card} md:col-span-3 p-4\`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="text-xl font-bold">Players</div>
+                    <span className={THEME.chip}>A: {teamA.length}/15</span>
+                    <span className={THEME.chip}>B: {teamB.length}/15</span>
+                    <div className="ml-auto flex items-center gap-2">
+                      <label className="text-xs text-slate-600">Round (s)</label>
+                      <input type="number" className="border rounded px-2 py-1 w-20" value={roundDuration} onChange={(e)=>setRoundDuration(parseInt(e.target.value||0,10))} />
+                      <button className={THEME.btnPrimary} onClick={startRound}>Start Round</button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    {teamA.map((p,i)=> (
+                      <div key={\`A\${i}\`} className="rounded-2xl p-3 bg-indigo-50 border border-indigo-200 text-center">
+                        <div className="text-2xl">{p.emoji||"❄️"}</div>
+                        <div className="text-sm font-semibold truncate">{p.name}</div>
+                        <div className="text-xs text-slate-600">Team A</div>
+                      </div>
+                    ))}
+                    {teamB.map((p,i)=> (
+                      <div key={\`B\${i}\`} className="rounded-2xl p-3 bg-rose-50 border border-rose-200 text-center">
+                        <div className="text-2xl">{p.emoji||"❄️"}</div>
+                        <div className="text-sm font-semibold truncate">{p.name}</div>
+                        <div className="text-xs text-slate-600">Team B</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {view === 'play' && (
+              <div className="lg:col-span-12 grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-8">
+                  <div className={\`\${THEME.card} p-3 flex items-center gap-2 mb-2\`}>
+                    <div className="text-lg font-bold">{roundTitle} — {mode === 'oneVsFifteen' ? '1 vs 15' : 'Practice'}</div>
+                    <span className={THEME.chip}>{LESSONS.find(l=>l.key===lesson)?.label}</span>
+                    <div className="ml-auto flex items-center gap-3 items-center">
+                      <div className="text-sm font-bold tabular-nums">⏱ {timeLeft}s</div>
+                      <select className="border rounded px-2 py-1" value={shooterIndex} onChange={(e)=>setShooterIndex(parseInt(e.target.value,10))}>
+                        {teamA.map((p,i)=>(<option key={i} value={i}>{p.name}</option>))}
+                      </select>
+                      <button className={THEME.btnGhost} onClick={()=>setView('results')}>Results</button>
+                      <button className={THEME.btnGhost} onClick={()=>setView('lobby')}>Lobby</button>
+                      <button className={THEME.btnGhost} onClick={endRound}>End</button>
+                    </div>
+                  </div>
+
+                  <div className="relative">
+                    <canvas ref={canvasRef} width={WORLD_W*16} height={WORLD_H*16} className="w-full rounded-2xl shadow bg-white" />
+                    {confetti.show && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <div className="text-white text-2xl font-black bg-black/30 px-4 py-2 rounded-xl">{confetti.label}!</div>
+                      </div>
+                    )}
+                    {roundOver && (
+                      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center rounded-2xl">
+                        <div className="text-center text-white p-6">
+                          <div className="text-3xl font-black mb-2">Round Over</div>
+                          <div className="text-sm mb-4">Time's up! Export results or see the scoreboard.</div>
+                          <div className="flex items-center justify-center gap-2">
+                            <button className={THEME.btnGhost} onClick={exportCSV}>Export CSV</button>
+                            <button className={THEME.btnPrimary} onClick={()=>{ setView('results'); }}>See Scoreboard</button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                    <div className={\`\${THEME.card} p-3\`}>
+                      <div className="font-semibold mb-2">Student Inputs</div>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <label className="flex items-center justify-between gap-2">Name
+                          <input className="border rounded px-2 py-1 w-40" value={studentName} onChange={(e)=>setStudentName(e.target.value)} placeholder="Optional"/>
+                        </label>
+                        <label className="flex items-center justify-between gap-2">Angle θ (deg)
+                          <input type="number" className="border rounded px-2 py-1 w-28" value={angleDeg} onChange={(e)=>setAngleDeg(parseFloat(e.target.value||0))} />
+                        </label>
+                        <label className="flex items-center justify-between gap-2">Speed v (m/s)
+                          <input type="number" className="border rounded px-2 py-1 w-28" value={speed} onChange={(e)=>setSpeed(parseFloat(e.target.value||0))} />
+                        </label>
+                        <label className="flex items-center justify-between gap-2">Range goal R (m)
+                          <input type="number" className="border rounded px-2 py-1 w-28" value={rangeGoal} onChange={(e)=>setRangeGoal(parseFloat(e.target.value||0))} />
+                        </label>
+                        <div className="text-xs text-slate-600 col-span-2">Shooter→Target dx: {fmt(dx)} m</div>
+                        {lesson==='time' && (
+                          <label className="flex items-center justify-between gap-2 col-span-2">Your computed time t (s)
+                            <input type="number" className="border rounded px-2 py-1 w-28" value={timeGuess} onChange={(e)=>setTimeGuess(parseFloat(e.target.value||0))} />
+                          </label>
+                        )}
+                      </div>
+                      <div className="mt-3 flex items-center gap-2">
+                        <button className={THEME.btnPrimary} onClick={simulateThrow}>Throw Snowball</button>
+                        <span className={\`text-sm \${hit? 'text-emerald-700':'text-slate-600'}\`}>{hit? 'Hit! Nice math.' : simPath.length? 'Miss. Adjust and try again.' : 'Enter values and throw.'}</span>
+                        {validationMsg && (<span className="text-sm text-rose-700">{validationMsg}</span>)}
+                      </div>
+                    </div>
+
+                    <div className={\`\${THEME.card} p-3\`}>
+                      <div className="font-semibold mb-2">Teacher Reference</div>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div>Range from inputs: <b>{fmt(refRange)}</b> m</div>
+                        <div>Time of flight: <b>{fmt(refTime)}</b> s</div>
+                        <div>Angle from R: <b>{Number.isFinite(refAngleFromR) ? (refAngleFromR*180/Math.PI).toFixed(2)+"°" : 'n/a'}</b></div>
+                        <div>Speed from R: <b>{Number.isFinite(refSpeedFromR) ? fmt(refSpeedFromR) + ' m/s' : 'n/a'}</b></div>
+                      </div>
+                      <div className="mt-3 text-xs text-slate-600">g={gravity} m/s² • aₓ={windAx} m/s² • Solve-before-throw: {solveBeforeThrow? 'On' : 'Off'} (±{tolerancePct}%)</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-4">
+                  <div className={\`\${THEME.card} p-3 mb-3\`}>
+                    <div className="font-semibold mb-1 flex items-center gap-2">1 vs 15 Progress <span className={THEME.chip}>Streak: {streak}</span></div>
+                    <div className="text-sm">Target: <b>{target?.name ?? '—'}</b> ({Math.min(progressIdx+1, teamB.length)}/15)</div>
+                    <div className="mt-2 grid grid-cols-5 gap-2">
+                      {teamB.map((p,i)=>(
+                        <div key={i} className={\`rounded-lg p-2 text-center text-xs \${i<progressIdx?'bg-emerald-100': i===progressIdx? 'bg-amber-100' : 'bg-slate-100'}\`}>
+                          <div className="text-base">{p.emoji||'❄️'}</div>
+                          <div className="truncate">{p.name}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className={\`\${THEME.card} p-3\`}>
+                    <div className="flex items-center gap-2 mb-2"><div className="text-lg font-semibold">Attempts Log</div><button className={\`\${THEME.btnGhost} ml-auto\`} onClick={exportCSV}>Export CSV</button></div>
+                    <div className="text-xs text-slate-600 mb-1">Badges: {badges.length? badges.join(' • ') : '—'}</div>
+                    <div className="overflow-auto border rounded max-h-64">
+                      <table className="min-w-full text-xs">
+                        <thead className="bg-slate-100">
+                          <tr>{["time","student","mode","lesson","shooter","target","θ","v","R","dx","hit","t","Rcalc"].map(h=> <th key={h} className="px-2 py-1 text-left whitespace-nowrap">{h}</th>)}</tr>
+                        </thead>
+                        <tbody>
+                          {attempts.map((r,i)=> (
+                            <tr key={i} className={i%2? 'bg-white':'bg-slate-50'}>
+                              <td className="px-2 py-1 whitespace-nowrap">{new Date(r.ts).toLocaleTimeString()}</td>
+                              <td className="px-2 py-1">{r.student}</td>
+                              <td className="px-2 py-1">{r.mode}</td>
+                              <td className="px-2 py-1">{r.lesson}</td>
+                              <td className="px-2 py-1">{r.shooter}</td>
+                              <td className="px-2 py-1">{r.target}</td>
+                              <td className="px-2 py-1">{fmt(r.theta)}</td>
+                              <td className="px-2 py-1">{fmt(r.v)}</td>
+                              <td className="px-2 py-1">{fmt(r.Rgoal)}</td>
+                              <td className="px-2 py-1">{fmt(r.dx)}</td>
+                              <td className="px-2 py-1">{r.hit? '✔':'✖'}</td>
+                              <td className="px-2 py-1">{fmt(r.tcalc)}</td>
+                              <td className="px-2 py-1">{fmt(r.Rcalc)}</td>
+                            </tr>
+                          ))}
+                          {!attempts.length && (<tr><td colSpan={13} className="px-2 py-8 text-center text-slate-500">No attempts yet.</td></tr>)}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {view === 'results' && (
+              <div className="lg:col-span-12 grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-8">
+                  <div className={\`\${THEME.card} p-6\`}>
+                    <div className="text-2xl font-black mb-2">Round Results</div>
+                    <div className="text-sm text-slate-600 mb-4">Export attempts to markbook or copy a summary.</div>
+                    <div className="overflow-auto border rounded">
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-slate-100">
+                          <tr>{["time","student","shooter","target","θ","v","Rgoal","hit","tcalc","Rcalc"].map(h=> <th key={h} className="px-2 py-2 text-left whitespace-nowrap">{h}</th>)}</tr>
+                        </thead>
+                        <tbody>
+                          {attempts.map((r,i)=> (
+                            <tr key={i} className={i%2? 'bg-white':'bg-slate-50'}>
+                              <td className="px-2 py-1 whitespace-nowrap">{new Date(r.ts).toLocaleTimeString()}</td>
+                              <td className="px-2 py-1">{r.student}</td>
+                              <td className="px-2 py-1">{r.shooter}</td>
+                              <td className="px-2 py-1">{r.target}</td>
+                              <td className="px-2 py-1">{fmt(r.theta)}</td>
+                              <td className="px-2 py-1">{fmt(r.v)}</td>
+                              <td className="px-2 py-1">{fmt(r.Rgoal)}</td>
+                              <td className="px-2 py-1">{r.hit? '✔':'✖'}</td>
+                              <td className="px-2 py-1">{fmt(r.tcalc)}</td>
+                              <td className="px-2 py-1">{fmt(r.Rcalc)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-3">
+                      <button className={THEME.btnGhost} onClick={exportCSV}>Export CSV</button>
+                      <button className={\`\${THEME.btnPrimary} ml-2\`} onClick={()=>setView('play')}>Back to Round</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-4">
+                  <div className={\`\${THEME.card} p-6\`}> 
+                    <div className="text-xl font-black mb-2">Scoreboard</div>
+                    <Scoreboard attempts={attempts} />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Student Join Helper */}
+          <div className="max-w-7xl mx-auto p-4">
+            <div className={\`\${THEME.card} p-4\`}>
+              <div className="text-lg font-semibold mb-1">Student Join — Token Maker</div>
+              <div className="text-sm text-slate-600 mb-2">Students can open this page too, enter the lobby code the teacher shows, create an avatar, then click <b>Copy Join Token</b> and send it to the teacher to paste.</div>
+              <StudentJoinMaker lobbyCode={lobbyCode} />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function StudentJoinMaker({ lobbyCode }){
+      const [code, setCode] = useState("");
+      const [team, setTeam] = useState("A");
+      const [name, setName] = useState("");
+      const [emoji, setEmoji] = useState("❄️");
+      const [color, setColor] = useState(COLORS[0]);
+      const [token, setToken] = useState("");
+
+      function makeToken(){
+        if(code.trim().toUpperCase() !== lobbyCode){ alert("Lobby code mismatch"); return; }
+        const data = { team, name, emoji, color };
+        const tok = encodeToken(data);
+        setToken(tok);
+        try { navigator.clipboard.writeText(tok); } catch(e) {}
+      }
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <div>
+            <label className="block text-xs text-slate-600">Lobby Code</label>
+            <input className="border rounded px-2 py-1 w-full" value={code} onChange={(e)=>setCode(e.target.value.toUpperCase())} placeholder="e.g., 7KQ4ZP" />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-600">Team</label>
+            <select className="border rounded px-2 py-1 w-full" value={team} onChange={(e)=>setTeam(e.target.value)}>
+              <option value="A">Team A (Shooters)</option>
+              <option value="B">Team B (Targets)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-600">Name</label>
+            <input className="border rounded px-2 py-1 w-full" value={name} onChange={(e)=>setName(e.target.value)} placeholder="Your name" />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-600">Emoji</label>
+            <input className="border rounded px-2 py-1 w-full" value={emoji} onChange={(e)=>setEmoji(e.target.value)} placeholder="❄️" />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-600">Color</label>
+            <select className="border rounded px-2 py-1 w-full" value={color} onChange={(e)=>setColor(e.target.value)}>
+              {COLORS.concat(["#ef4444"]).map(c=> <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="flex items-end">
+            <button className="rounded-xl px-4 py-2 text-white bg-indigo-600 hover:bg-indigo-500" onClick={makeToken}>Copy Join Token</button>
+          </div>
+          <div className="md:col-span-3">
+            <label className="block text-xs text-slate-600">Join Token</label>
+            <textarea className="w-full h-20 border rounded p-2 text-xs font-mono" value={token} onFocus={(e)=>e.target.select()} readOnly />
+            <div className="text-xs text-slate-600 mt-1">Copy the token and send it to your teacher to be added to the lobby.</div>
+          </div>
+        </div>
+      );
+    }
+
+    function defaultRoster(side){
+      return Array.from({length: 3}).map((_,i)=> ({ name: \`\${side} Player \${i+1}\`, emoji: side==='A' ? '🧢' : '🧣', color: side==='A' ? '#2563eb' : '#ef4444' }));
+    }
+
+    function Scoreboard({ attempts }){
+      const stats = useMemo(()=>{
+        const m = new Map();
+        const byStudent = attempts.slice().reverse().reduce((acc, r)=>{
+          if(!acc[r.student]) acc[r.student] = [];
+          acc[r.student].push(r);
+          return acc;
+        }, {});
+
+        Object.entries(byStudent).forEach(([name, arr])=>{
+          const tries = arr.length;
+          const hits = arr.filter(a=>a.hit).length;
+          const accuracy = tries ? (hits/tries) : 0;
+          const avgT = arr.length ? (arr.reduce((s,a)=> s + (a.tcalc||0), 0) / arr.length) : 0;
+          let maxStreak = 0, cur = 0;
+          for(const a of arr){ cur = a.hit ? cur+1 : 0; if(cur>maxStreak) maxStreak = cur; }
+          m.set(name, { name, tries, hits, accuracy, avgT, maxStreak });
+        });
+
+        return Array.from(m.values()).sort((a,b)=> b.hits - a.hits || b.accuracy - a.accuracy || a.avgT - b.avgT);
+      }, [attempts]);
+
+      if(!stats.length) return <div className="text-slate-600 text-sm">No data yet.</div>;
+
+      return (
+        <div className="overflow-auto border rounded">
+          <table className="min-w-full text-sm">
+            <thead className="bg-slate-100">
+              <tr>
+                {['Rank','Student','Tries','Hits','Accuracy','Avg t (s)','Max Streak'].map(h=> <th key={h} className="px-2 py-2 text-left whitespace-nowrap">{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {stats.map((s, i)=> (
+                <tr key={s.name} className={i%2 ? 'bg-white':'bg-slate-50'}>
+                  <td className="px-2 py-1">#{i+1}</td>
+                  <td className="px-2 py-1">{s.name}</td>
+                  <td className="px-2 py-1">{s.tries}</td>
+                  <td className="px-2 py-1">{s.hits}</td>
+                  <td className="px-2 py-1">{(s.accuracy*100).toFixed(0)}%</td>
+                  <td className="px-2 py-1">{fmt(s.avgT)}</td>
+                  <td className="px-2 py-1">{s.maxStreak}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<SnowballFightApp />);
+  </script>
+</body>
+</html>
